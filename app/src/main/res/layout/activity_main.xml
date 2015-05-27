@@ -12,4 +12,9 @@
         android:layout_marginTop="16dp" android:text="@string/connect_to_peer"
         android:textStyle="bold" />
 
+    <Button android:id="@+id/view_all_items" style="?android:textAppearanceSmall"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="16dp" android:text="@string/view_all_items"
+        android:textStyle="bold" />
+
 </LinearLayout>
