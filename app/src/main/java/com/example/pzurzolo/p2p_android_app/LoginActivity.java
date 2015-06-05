@@ -7,6 +7,7 @@ import android.app.Activity;
 import android.app.LoaderManager.LoaderCallbacks;
 import android.content.ContentResolver;
 import android.content.CursorLoader;
+import android.content.Intent;
 import android.content.Loader;
 import android.database.Cursor;
 import android.net.Uri;
@@ -28,6 +29,8 @@ import android.widget.TextView;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 
 /**
@@ -84,6 +87,14 @@ public class LoginActivity extends Activity implements LoaderCallbacks<Cursor> {
 
         mLoginFormView = findViewById(R.id.login_form);
         mProgressView = findViewById(R.id.login_progress);
+    }
+
+    protected void onPause() {
+        super.onPause();
+
+        // Login is successful, transition to MainActivity
+        Intent intent = new Intent(this, MainActivity.class);
+        startActivity(intent);
     }
 
     private void populateAutoComplete() {
@@ -145,8 +156,18 @@ public class LoginActivity extends Activity implements LoaderCallbacks<Cursor> {
     }
 
     private boolean isEmailValid(String email) {
-        //TODO: Replace this with your own logic
-        return email.contains("@");
+        boolean isValid = false;
+
+        String expr = "^[\\w\\.-]+@([\\w\\-]+\\.)+[A-Z]{2,4}$";
+
+        Pattern pattern = Pattern.compile(expr, Pattern.CASE_INSENSITIVE);
+        Matcher matcher = pattern.matcher(email);
+
+        if(matcher.matches()) {
+            isValid = true;
+        }
+
+        return isValid;
     }
 
     private boolean isPasswordValid(String password) {
