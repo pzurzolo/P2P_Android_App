@@ -1,6 +1,5 @@
 package com.example.pzurzolo.p2p_android_app;
 
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -25,5 +24,8 @@ public class Peer {
     public void addPackageToList(ItemPackage newItem) {
         //TODO: Need to add in checks to make sure item being added is valid.
         items.add(newItem);
+    }
+    public void removePackageFromList(ItemPackage item) {
+        items.remove(item);
     }
 }
