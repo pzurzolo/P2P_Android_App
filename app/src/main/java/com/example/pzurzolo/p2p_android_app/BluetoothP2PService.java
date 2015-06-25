@@ -16,6 +16,7 @@ import android.content.Context;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
+import android.util.Log;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -24,6 +25,9 @@ import java.util.UUID;
 
 
 public class BluetoothP2PService {
+
+    // Debugging
+    private static final String TAG = "BluetoothP2PService";
 
     // Name for the SDP record when creating a server socket
     private static final String NAME_SECURE = "BluetoothP2PSecure";
@@ -61,7 +65,6 @@ public class BluetoothP2PService {
         mHandler = handler;
     }
 
-
     /*
      * Set the current state of the P2P connection.
      */
@@ -72,12 +75,10 @@ public class BluetoothP2PService {
         mHandler.obtainMessage(Constants.MESSAGE_STATE_CHANGE, state, -1).sendToTarget();
     }
 
-
     /*
      * Return the current connection state.
      */
     public synchronized int getState() { return mState; }
-
 
     /*
      * Start the P2P service. Specifically start AcceptThread to begin a
@@ -110,7 +111,6 @@ public class BluetoothP2PService {
         }
     }
 
-
     /*
      * Start the ConnectThread to initiate a connection to a Peer.
      */
@@ -135,7 +135,6 @@ public class BluetoothP2PService {
         mConnectThread.start();
         setState(STATE_CONNECTING);
     }
-
 
     /*
      * Start the ConnectedThread to begin managing a Bluetooth connection
@@ -177,5 +176,319 @@ public class BluetoothP2PService {
         mHandler.sendMessage(msg);
 
         setState(STATE_CONNECTED);
+    }
+
+    /*
+     * Stop all threads.
+     */
+    public synchronized void stop() {
+
+        if(mConnectThread != null) {
+            mConnectThread.cancel();
+            mConnectThread = null;
+        }
+
+        if(mConnectedThread != null) {
+            mConnectedThread.cancel();
+            mConnectedThread = null;
+        }
+
+        if(mSecureAcceptThread != null) {
+            mSecureAcceptThread.cancel();
+            mSecureAcceptThread = null;
+        }
+
+        if(mInsecureAcceptThread != null) {
+            mInsecureAcceptThread.cancel();
+            mInsecureAcceptThread = null;
+        }
+
+        setState(STATE_NONE);
+    }
+
+    /*
+     * Write to the ConnectedThread in an unsyncronised manner
+     */
+    public void write(byte[] out) {
+
+        // Create a temp object
+        ConnectedThread r;
+
+        // Syncronise a copy of the ConnectedThread
+        synchronized (this) {
+            if(mState != STATE_CONNECTED)   return;
+            r = mConnectedThread;
+        }
+
+        // Perform the write unsynchronised
+        r.write(out);
+    }
+
+    /*
+     * Indicate that the connection attempt failed and notify the UI Activity.
+     */
+    private void connectionFailed() {
+
+        // Send a failure message back to the Activity
+        Message msg = mHandler.obtainMessage(Constants.MESSAGE_TOAST);
+        Bundle bundle = new Bundle();
+        bundle.putString(Constants.TOAST, "Unable to connect device");
+        msg.setData(bundle);
+        mHandler.sendMessage(msg);
+
+        // Start the service over to restart listening mode
+        BluetoothP2PService.this.start();
+    }
+
+    /*
+     * Indicate that the connection was lost and notify the UI Activity
+     */
+    private void connectionLost() {
+
+        // Send a failure message back to the Activity
+        Message msg = mHandler.obtainMessage(Constants.MESSAGE_TOAST);
+        Bundle bundle = new Bundle();
+        bundle.putString(Constants.TOAST, "Device connection was lost");
+        msg.setData(bundle);
+        mHandler.sendMessage(msg);
+
+        // Start the service over to restart listening mode
+        BluetoothP2PService.this.start();
+    }
+
+
+    /*
+     * This thread runs while listening for incoming connections. It behaves
+     * like a server-side client. It runs until a connection is accepted
+     * (or until cancelled).
+     */
+    private class AcceptThread extends Thread {
+
+        // The local server socket
+        private final BluetoothServerSocket mServerSocket;
+        private String mSocketType;
+
+        public AcceptThread(boolean secure) {
+            BluetoothServerSocket tmp = null;
+            mSocketType = secure ? "Secure" : "Insecure";
+
+            // Create a new listening server socket
+            try {
+                if(secure) {
+                    tmp = mAdapter.listenUsingRfcommWithServiceRecord(NAME_SECURE,
+                            MY_UUID_SECURE);
+                } else {
+                    tmp = mAdapter.listenUsingInsecureRfcommWithServiceRecord(
+                            NAME_INSECURE, MY_UUID_INSECURE);
+                }
+            } catch (IOException e) {
+                Log.e(TAG, "Socket Type: " + mSocketType + " listen() failed", e);
+            }
+            mServerSocket = tmp;
+        }
+
+        public void run() {
+
+            setName("AcceptThread" + mSocketType);
+
+            BluetoothSocket socket = null;
+
+            // Listen to the server socket if we're not connected
+            while(mState != STATE_CONNECTED) {
+                try {
+                    // This is a blocking call and will only return on a
+                    // successful connection or an exception
+                    socket = mServerSocket.accept();
+                } catch (IOException e) {
+                    Log.e(TAG, "SocketType: " + mSocketType + " accept() failed", e);
+                    break;
+                }
+
+                // If a connection was accepted
+                if(socket != null) {
+                    synchronized (BluetoothP2PService.this) {
+                        switch (mState) {
+                            case STATE_LISTEN:
+                            case STATE_CONNECTING:
+                                // Situation normal. Start the connected thread.
+                                connected(socket, socket.getRemoteDevice(),
+                                        mSocketType);
+                                break;
+                            case STATE_NONE:
+                            case STATE_CONNECTED:
+                                // Either not ready or already connected. Terminate new socket.
+                                try {
+                                    socket.close();
+                                } catch (IOException e) {
+                                    Log.e(TAG, "Could not close unwanted socket", e);
+                                }
+                                break;
+                        }
+                    }
+                }
+            }
+        }
+
+        public void cancel() {
+
+            try {
+                mServerSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Socket Type " + mSocketType + " close() of server failed", e);
+            }
+        }
+    }
+
+
+    /*
+     * This thread runs while attempting to make an outgoing connection with
+     * a device. It runs straight through; the connection either
+     * succeeds or fails.
+     */
+    private class ConnectThread extends Thread {
+
+        private final BluetoothSocket mSocket;
+        private final BluetoothDevice mDevice;
+        private String mSocketType;
+
+        public ConnectThread(BluetoothDevice device, boolean secure) {
+
+            mDevice = device;
+            BluetoothSocket tmp = null;
+            mSocketType = secure ? "Secure" : "Insecure";
+
+            // Get a BluetoothSocket for a connection with the
+            // given BluetoothDevice
+            try {
+                if(secure) {
+                    tmp = device.createRfcommSocketToServiceRecord(
+                            MY_UUID_SECURE);
+                } else {
+                    tmp = device.createInsecureRfcommSocketToServiceRecord(
+                            MY_UUID_INSECURE);
+                }
+            } catch (IOException e) {
+                Log.e(TAG, "Socket Type: " + mSocketType + " create() failed", e);
+            }
+            mSocket = tmp;
+        }
+
+        public void run() {
+
+            setName("ConnectThread" + mSocketType);
+
+            // Always cancel discovery because it will slow down a connection
+            mAdapter.cancelDiscovery();
+
+            // Make a connection to the BluetoothSocket
+            try {
+                // This is a blocking call and will only return on a
+                // successful connection or an exception
+                mSocket.connect();
+            } catch (IOException e) {
+                // Close the socket
+                try {
+                    mSocket.close();
+                } catch (IOException e2) {
+                    Log.e(TAG, "unable to close() " + mSocketType +
+                    " socket during connection failure", e2);
+                }
+                connectionFailed();
+                return;
+            }
+
+            // Reset the ConnectThread because we're done
+            synchronized (BluetoothP2PService.this) {
+                mConnectThread = null;
+            }
+
+            // Start the connected thread
+            connected(mSocket, mDevice, mSocketType);
+        }
+
+        public void cancel() {
+
+            try {
+                mSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "close() of connect " + mSocketType + " socket failed", e);
+            }
+        }
+    }
+
+
+    /*
+     * This thread runs during a connection with a remote device.
+     * It handles all incoming and outgoing transmissions.
+     */
+    private class ConnectedThread extends Thread {
+
+        private final BluetoothSocket mSocket;
+        private final InputStream mInputStream;
+        private final OutputStream mOutputStream;
+
+        public ConnectedThread(BluetoothSocket socket, String socketType) {
+
+            mSocket = socket;
+            InputStream tmpIn = null;
+            OutputStream tmpOut = null;
+
+            // Get the BluetoothSocket input and output streams
+            try {
+                tmpIn = socket.getInputStream();
+                tmpOut = socket.getOutputStream();
+            } catch (IOException e) {
+                Log.e(TAG, "temp sockets not created", e);
+            }
+
+            mInputStream = tmpIn;
+            mOutputStream = tmpOut;
+        }
+
+        public void run() {
+
+            byte[] buffer = new byte[1024];
+            int bytes;
+
+            // Keep listening to the InputStream while connected
+            while(true) {
+                try {
+                    // Read from the InputStream
+                    bytes = mInputStream.read(buffer);
+
+                    // Send the obtained bytes to the UI Activity
+                    mHandler.obtainMessage(Constants.MESSAGE_READ, bytes, -1, buffer)
+                            .sendToTarget();
+                } catch (IOException e) {
+                    connectionLost();
+                    // Start the service over to restart listening mode.
+                    BluetoothP2PService.this.start();
+                    break;
+                }
+            }
+        }
+
+        /*
+         * Write to the connected OutStream.
+         */
+        public void write(byte[] buffer) {
+            try {
+                mOutputStream.write(buffer);
+
+                // Share the sent item back to the UI Activity
+                mHandler.obtainMessage(Constants.MESSAGE_WRITE, -1, -1, buffer)
+                        .sendToTarget();
+            } catch (IOException e) {
+                Log.e(TAG, "Exception during write");
+            }
+        }
+
+        public void cancel() {
+            try {
+                mSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "close() of connect socket failed", e);
+            }
+        }
     }
 }
